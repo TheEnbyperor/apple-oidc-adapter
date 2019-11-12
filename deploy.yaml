@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apple-oidc-adapter
+  namespace: keycloak
+  labels:
+    app: apple-oidc-adapter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apple-oidc-adapter
+  template:
+    metadata:
+      labels:
+        app: apple-oidc-adapter
+    spec:
+      volumes:
+        - name: prod-certs
+          secret:
+            secretName: apple-prod-certs
+      containers:
+        - name: apple-oidc-adapter
+          image: theenbyperor/wwfypc-apple-oidc:(version)
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - mountPath: /secrets
+              name: prod-certs
+          envFrom:
+            - secretRef:
+                name: apple-prod-secrets
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: keycloak
+  name: apple-prod-certs
+  labels:
+    app: apple-prod-certs
+spec:
+  selector:
+    app: apple-prod-certs
+  ports:
+    - port: 80
+      targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: apple-prod-certs-ingress
+  namespace: keycloak
+  annotations:
+    certmanager.k8s.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  tls:
+    - hosts:
+        - apple.account.cardifftec.uk
+      secretName: apple-prod-certs-tls
+  rules:
+  - host: apple.account.cardifftec.uk
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: apple-prod-certs
+          servicePort: 80

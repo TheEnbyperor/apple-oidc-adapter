@@ -463,6 +463,11 @@ async fn jwks(data: web::Data<Config>) -> actix_web::Result<impl actix_web::Resp
 
 fn main() {
     pretty_env_logger::init();
+    openssl_probe::init_ssl_cert_env_vars();
+
+    let _guard = sentry::init("https://efc22f89d34a46d0adffb302181ed3f9@sentry.io/1471674");
+    sentry::integrations::panic::register_panic_handler();
+    sentry::integrations::env_logger::init(None, Default::default());
 
     let sys = actix::System::new("apple-oidc-adaptor");
 
@@ -471,10 +476,9 @@ fn main() {
     let mut server = HttpServer::new(move || {
         App::new()
             .data(data.clone())
+            .wrap(sentry_actix::SentryMiddleware::new())
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
-            .route(".well-known/apple-developer-domain-association.txt", web::get().to(|| HttpResponse::Ok().body(
-                actix_web::dev::Body::from_slice(include_bytes!("../apple-developer-domain-association.txt")))))
             .route("/auth/authorize", web::get().to_async(actix_web_async_await::compat2(start_login)))
             .route("/auth/callback", web::post().to_async(actix_web_async_await::compat2(finish_login)))
             .route("/auth/token", web::post().to_async(actix_web_async_await::compat3(get_token)))

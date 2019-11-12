@@ -1,13 +1,13 @@
 [package]
 name = "apple-oidc-adapter"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Q <q@misell.cymru>"]
 edition = "2018"
 
 [dependencies]
 actix = "0.8"
 actix-web = "1.0"
-actix-web-async-await = { path = "../actix-web-async-await" }
+actix-web-async-await = { git = "https://github.com/TheEnbyperor/actix-web-async-await.git" }
 dotenv = "0.15"
 pretty_env_logger = "0.3"
 listenfd = "0.3"
@@ -17,9 +17,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 reqwest = "0.9"
-jsonwebtoken = "6"
-ring = "0.14"
-untrusted = "0.6"
 futures-preview = { version = "0.3.0-alpha.19", features = ["compat"] }
 openssl = "0.10"
 failure = "0.1"
+sentry = "0.12.0"
+sentry-actix = "0.11.0"
+openssl-probe = "0.1.2"
