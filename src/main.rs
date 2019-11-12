@@ -467,7 +467,6 @@ fn main() {
 
     let _guard = sentry::init("https://efc22f89d34a46d0adffb302181ed3f9@sentry.io/1471674");
     sentry::integrations::panic::register_panic_handler();
-    sentry::integrations::env_logger::init(None, Default::default());
 
     let sys = actix::System::new("apple-oidc-adaptor");
 
@@ -476,7 +475,6 @@ fn main() {
     let mut server = HttpServer::new(move || {
         App::new()
             .data(data.clone())
-            .wrap(sentry_actix::SentryMiddleware::new())
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             .route("/auth/authorize", web::get().to_async(actix_web_async_await::compat2(start_login)))

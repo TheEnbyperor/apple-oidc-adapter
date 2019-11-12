@@ -7,9 +7,9 @@ COPY Cargo.toml Cargo.lock ./
 RUN cargo build --release
 
 COPY src ./src
-RUN cargo install --target x86_64-unknown-linux-musl --path . && musl-strip /usr/local/cargo/bin/apple-oidc-adapter
+RUN  touch src/main.rs && cargo install --target x86_64-unknown-linux-musl --path .
 
 FROM scratch
-COPY --from=build /usr/local/cargo/bin/apple-oidc-adapter .
+COPY --from=build /root/.cargo/bin/apple-oidc-adapter .
 USER 1000
 CMD ["./apple-oidc-adapter"]

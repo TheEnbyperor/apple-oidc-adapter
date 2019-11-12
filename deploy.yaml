@@ -30,6 +30,9 @@ spec:
           envFrom:
             - secretRef:
                 name: apple-prod-secrets
+          env:
+            - name: RUST_LOG
+              value: info
 ---
 apiVersion: v1
 kind: Service
