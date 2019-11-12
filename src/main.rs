@@ -465,7 +465,7 @@ fn main() {
     pretty_env_logger::init();
     openssl_probe::init_ssl_cert_env_vars();
 
-    let _guard = sentry::init("https://efc22f89d34a46d0adffb302181ed3f9@sentry.io/1471674");
+    let _guard = sentry::init("https://e0c980d93d9044ba877d3ee123debaee@sentry.io/1817437");
     sentry::integrations::panic::register_panic_handler();
 
     let sys = actix::System::new("apple-oidc-adaptor");
