@@ -38,12 +38,12 @@ apiVersion: v1
 kind: Service
 metadata:
   namespace: keycloak
-  name: apple-prod-certs
+  name: apple-oidc-adapter
   labels:
-    app: apple-prod-certs
+    app: apple-oidc-adapter
 spec:
   selector:
-    app: apple-prod-certs
+    app: apple-oidc-adapter
   ports:
     - port: 80
       targetPort: 3000
@@ -67,5 +67,5 @@ spec:
       paths:
       - path: /
         backend:
-          serviceName: apple-prod-certs
+          serviceName: apple-oidc-adapter
           servicePort: 80
