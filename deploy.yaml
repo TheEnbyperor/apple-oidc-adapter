@@ -19,6 +19,9 @@ spec:
         - name: prod-certs
           secret:
             secretName: apple-prod-certs
+        - name: dev-certs
+          secret:
+            secretName: apple-dev-certs
       containers:
         - name: apple-oidc-adapter
           image: theenbyperor/wwfypc-apple-oidc:(version)
@@ -27,6 +30,8 @@ spec:
           volumeMounts:
             - mountPath: /secrets
               name: prod-certs
+            - mountPath: /secrets-dev
+              name: dev-certs
           envFrom:
             - secretRef:
                 name: apple-prod-secrets

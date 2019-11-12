@@ -395,6 +395,7 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
     }
 
     let new_token = encode_jwt_rsa(&new_header, &claims, &cert.id_key)?;
+    println!("{}", now_token);
 
     let new_token = TokenResponse {
         access_token: token.access_token,
