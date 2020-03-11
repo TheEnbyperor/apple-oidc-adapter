@@ -529,7 +529,13 @@ async fn abc_token(info: web::Query<ABCOauthTokenInfo>) -> failure::Fallible<imp
 
     let client = reqwest::r#async::Client::new();
     let mut resp = client.post(reqwest::Url::parse(&token_uri)?)
-        .form(&info.0)
+        .form(&ABCOauthTokenInfo {
+            client_id: "apple-business-chat".to_string(),
+            client_secret: info.client_secret.clone(),
+            code: info.code.clone(),
+            grant_type: info.grant_type.clone(),
+            redirect_uri: info.redirect_uri.clone()
+        })
         .send().compat().await?;
 
     if !resp.status().is_success() {
