@@ -1,15 +1,16 @@
 #[macro_use]
-extern crate serde;
+extern crate failure;
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate failure;
+extern crate serde;
+
+use std::collections::HashMap;
+use std::env;
+use std::io::Read;
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, middleware, web};
-use std::io::Read;
-use std::env;
 use futures::compat::Future01CompatExt;
-use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 struct Cert {
@@ -86,20 +87,22 @@ struct OauthState {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct AppleUserName {
-    #[serde(rename = "firstName")]
+    #[serde(rename = "firstName", skip_serializing_if = "Option::is_none")]
     first_name: Option<String>,
-    #[serde(rename = "lastName")]
+    #[serde(rename = "lastName", skip_serializing_if = "Option::is_none")]
     last_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct AppleUserInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<AppleUserName>,
     email: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct OauthCode {
+    #[serde(skip_serializing_if = "Option::is_none")]
     user_info: Option<AppleUserInfo>,
     orig_code: String,
 }
@@ -129,7 +132,7 @@ async fn start_login(req: HttpRequest, info: web::Query<OauthLoginInfo>) -> acti
     let state = serde_json::to_string(&OauthState {
         redirect_url: info.redirect_uri.clone(),
         orig_state: info.state.clone(),
-        client_id: info.client_id.clone()
+        client_id: info.client_id.clone(),
     })?;
     redirect_uri.push_str(&format!("&state={}", base64::encode(&state)));
 
@@ -323,7 +326,7 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
             ensure!(verifier.verify(&sig)?);
 
             Some(serde_json::from_slice(&base64::decode_config(parts[1], base64::URL_SAFE_NO_PAD)?)?)
-        },
+        }
         None => None
     };
     let orig_code = match &code {
@@ -467,6 +470,82 @@ async fn jwks(data: web::Data<Config>) -> actix_web::Result<impl actix_web::Resp
     )
 }
 
+#[derive(Deserialize)]
+struct ABCOauthLoginInfo {
+    client_id: String,
+    redirect_uri: String,
+    scope: Option<String>,
+    state: Option<String>,
+    response_type: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ABCOauthTokenInfo {
+    client_id: String,
+    client_secret: String,
+    code: String,
+    grant_type: String,
+    redirect_uri: String,
+}
+
+async fn start_abc_login(info: web::Query<ABCOauthLoginInfo>) -> actix_web::Result<impl actix_web::Responder> {
+    let mut redirect_uri =
+        format!(
+            "https://account.cardifftec.uk/auth/realms/{}/protocol/openid-connect/auth?client_id=apple-business-chat&redirect_uri={}&response_type={}",
+            info.client_id, info.redirect_uri, info.response_type
+        );
+
+    if info.redirect_uri != "https://auth.businesschat.apple.com" {
+        return Ok(
+            HttpResponse::BadRequest().finish()
+        );
+    }
+
+    if let Some(scope) = &info.scope {
+        redirect_uri.push_str(&format!("&scope={}", scope));
+    }
+    if let Some(state) = &info.state {
+        redirect_uri.push_str(&format!("&state={}", state));
+    }
+
+    Ok(
+        HttpResponse::Found()
+            .header(actix_web::http::header::LOCATION, redirect_uri)
+            .finish()
+    )
+}
+
+async fn abc_token(info: web::Query<ABCOauthTokenInfo>) -> failure::Fallible<impl actix_web::Responder> {
+    if info.redirect_uri != "https://auth.businesschat.apple.com" {
+        return Ok(
+            HttpResponse::BadRequest().finish()
+        );
+    }
+
+    let token_uri = format!(
+        "https://account.cardifftec.uk/auth/realms/{}/protocol/openid-connect/token",
+        info.client_id
+    );
+
+    let client = reqwest::r#async::Client::new();
+    let mut resp = client.post(reqwest::Url::parse(&token_uri)?)
+        .form(&info.0)
+        .send().compat().await?;
+
+    if !resp.status().is_success() {
+        return Ok(
+            HttpResponse::new(resp.status())
+        )
+    }
+
+    let token = resp.json::<TokenResponse>().compat().await?;
+
+    Ok(
+        HttpResponse::Ok()
+            .json(token)
+    )
+}
+
 fn main() {
     pretty_env_logger::init();
     openssl_probe::init_ssl_cert_env_vars();
@@ -487,6 +566,8 @@ fn main() {
             .route("/auth/callback", web::post().to_async(actix_web_async_await::compat2(finish_login)))
             .route("/auth/token", web::post().to_async(actix_web_async_await::compat3(get_token)))
             .route("/auth/keys", web::get().to_async(actix_web_async_await::compat(jwks)))
+            .route("/abc/authorize", web::get().to_async(actix_web_async_await::compat(start_abc_login)))
+            .route("/abc/token", web::post().to_async(actix_web_async_await::compat(abc_token)))
     });
 
     let mut listenfd = listenfd::ListenFd::from_env();
