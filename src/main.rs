@@ -87,15 +87,15 @@ struct OauthState {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct AppleUserName {
     #[serde(rename = "firstName")]
-    first_name: String,
+    first_name: Option<String>,
     #[serde(rename = "lastName")]
-    last_name: String,
+    last_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct AppleUserInfo {
-    name: AppleUserName,
-    email: String,
+    name: Option<AppleUserName>,
+    email: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -389,8 +389,14 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
 
     if let Some(code) = code {
         if let Some(user_info) = code.user_info {
-            claims.insert("given_name".to_string(), serde_json::value::Value::String(user_info.name.first_name));
-            claims.insert("family_name".to_string(), serde_json::value::Value::String(user_info.name.last_name));
+            if let Some(user_name) = user_info.name {
+                if let Some(user_first_name) = user_name.first_name {
+                    claims.insert("given_name".to_string(), serde_json::value::Value::String(user_first_name));
+                }
+                if let Some(user_last_name) = user_name.last_name {
+                    claims.insert("family_name".to_string(), serde_json::value::Value::String(user_last_name));
+                }
+            }
         }
     }
 
