@@ -454,7 +454,7 @@ async fn jwks(data: web::Data<Config>) -> actix_web::Result<impl actix_web::Resp
             JWK {
                 kty: "RSA".to_string(),
                 r#use: "sig".to_string(),
-                alg: "RSA256".to_string(),
+                alg: "RS256".to_string(),
                 kid: client_id.to_string(),
                 n: base64::encode_config(&n, base64::URL_SAFE_NO_PAD),
                 e: base64::encode_config(&e, base64::URL_SAFE_NO_PAD),
