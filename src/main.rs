@@ -524,7 +524,7 @@ async fn main() -> std::io::Result<()> {
 
     let mut server = HttpServer::new(move || {
         App::new()
-            .app_data(data.clone())
+            .app_data(web::Data::new(data.clone()))
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
             .route("/auth/authorize", web::get().to(start_login))
