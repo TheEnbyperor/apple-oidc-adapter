@@ -8,9 +8,21 @@ extern crate serde;
 use std::collections::HashMap;
 use std::env;
 use std::io::Read;
+use base64::prelude::*;
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, middleware, web};
-use futures::compat::Future01CompatExt;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+#[derive(Debug)]
+struct StringError(String);
+
+impl std::fmt::Display for StringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl actix_web::error::ResponseError for StringError {}
 
 #[derive(Clone, Debug)]
 struct Cert {
@@ -116,7 +128,7 @@ struct OauthLoginInfo {
     state: Option<String>,
 }
 
-async fn start_login(req: HttpRequest, info: web::Query<OauthLoginInfo>) -> actix_web::Result<impl actix_web::Responder> {
+async fn start_login(req: HttpRequest, info: web::Query<OauthLoginInfo>) -> Result<impl actix_web::Responder, actix_web::error::Error> {
     let own_uri = format!("https://{}/auth/callback", req.connection_info().host());
     let mut redirect_uri =
         format!("https://appleid.apple.com/auth/authorize?client_id={}&redirect_uri={}&response_type=code&response_mode=form_post",
@@ -134,11 +146,11 @@ async fn start_login(req: HttpRequest, info: web::Query<OauthLoginInfo>) -> acti
         orig_state: info.state.clone(),
         client_id: info.client_id.clone(),
     })?;
-    redirect_uri.push_str(&format!("&state={}", base64::encode(&state)));
+    redirect_uri.push_str(&format!("&state={}", BASE64_STANDARD.encode(&state)));
 
     Ok(
         HttpResponse::Found()
-            .header(actix_web::http::header::LOCATION, redirect_uri)
+            .append_header((actix_web::http::header::LOCATION, redirect_uri))
             .finish()
     )
 }
@@ -151,8 +163,11 @@ struct OauthCallbackInfo {
     user: Option<String>,
 }
 
-async fn finish_login(info: web::Form<OauthCallbackInfo>, data: web::Data<Config>) -> failure::Fallible<impl actix_web::Responder> {
-    let state: OauthState = serde_json::from_slice(&base64::decode(&info.state)?)?;
+async fn finish_login(info: web::Form<OauthCallbackInfo>, data: web::Data<Config>) -> Result<impl actix_web::Responder, actix_web::error::Error> {
+    let state: OauthState = serde_json::from_slice(
+        &BASE64_STANDARD.decode(&info.state)
+            .map_err(|e| StringError(e.to_string()))?
+    )?;
     let mut redirect_uri = state.redirect_url;
 
     if let Some(error) = &info.error {
@@ -166,7 +181,7 @@ async fn finish_login(info: web::Form<OauthCallbackInfo>, data: web::Data<Config
 
         let cert = match data.certs.get(&state.client_id) {
             Some(c) => c,
-            None => bail!("Client ID not found")
+            None => return Err(StringError("Client ID not found".to_string()).into())
         };
 
         let header = AppleSecretHeader {
@@ -185,7 +200,7 @@ async fn finish_login(info: web::Form<OauthCallbackInfo>, data: web::Data<Config
 
     Ok(
         HttpResponse::Found()
-            .header(actix_web::http::header::LOCATION, redirect_uri)
+            .append_header((actix_web::http::header::LOCATION, redirect_uri))
             .finish()
     )
 }
@@ -226,9 +241,13 @@ struct TokenResponse {
     token_type: String,
 }
 
-fn encode_jwt_ecdsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims: &C, priv_key: &openssl::ec::EcKeyRef<openssl::pkey::Private>) -> failure::Fallible<String> {
-    let header_str = base64::encode_config(&serde_json::to_string(header)?, base64::URL_SAFE_NO_PAD);
-    let claims_str = base64::encode_config(&serde_json::to_string(claims)?, base64::URL_SAFE_NO_PAD);
+fn encode_jwt_ecdsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims: &C, priv_key: &openssl::ec::EcKeyRef<openssl::pkey::Private>) -> Result<String, actix_web::error::Error> {
+    let header_str = URL_SAFE_NO_PAD.encode(
+        &serde_json::to_string(header).map_err(|e| StringError(e.to_string()))?
+    );
+    let claims_str =  URL_SAFE_NO_PAD.encode(
+        &serde_json::to_string(claims).map_err(|e| StringError(e.to_string()))?
+    );
 
     let mut secret = String::new();
     secret.push_str(&header_str);
@@ -237,10 +256,11 @@ fn encode_jwt_ecdsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims
 
     let mut digester = openssl::sha::Sha256::new();
     digester.update(&secret.as_bytes());
-    let signer = openssl::ecdsa::EcdsaSig::sign(&digester.finish(), priv_key)?;
+    let signer = openssl::ecdsa::EcdsaSig::sign(&digester.finish(), priv_key)
+        .map_err(|e| StringError(e.to_string()))?;
     let mut signature = signer.r().to_vec();
     signature.extend(signer.s().to_vec());
-    let signature = base64::encode_config(&signature, base64::URL_SAFE_NO_PAD);
+    let signature = URL_SAFE_NO_PAD.encode(&signature);
 
     secret.push('.');
     secret.push_str(&signature);
@@ -248,20 +268,28 @@ fn encode_jwt_ecdsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims
     Ok(secret)
 }
 
-fn encode_jwt_rsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims: &C, priv_key: &openssl::rsa::RsaRef<openssl::pkey::Private>) -> failure::Fallible<String> {
-    let header_str = base64::encode_config(&serde_json::to_string(header)?, base64::URL_SAFE_NO_PAD);
-    let claims_str = base64::encode_config(&serde_json::to_string(claims)?, base64::URL_SAFE_NO_PAD);
+fn encode_jwt_rsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims: &C, priv_key: &openssl::rsa::RsaRef<openssl::pkey::Private>) -> Result<String, actix_web::error::Error> {
+    let header_str = URL_SAFE_NO_PAD.encode(
+        &serde_json::to_string(header).map_err(|e| StringError(e.to_string()))?
+    );
+    let claims_str = URL_SAFE_NO_PAD.encode(
+        &serde_json::to_string(claims).map_err(|e| StringError(e.to_string()))?
+    );
 
     let mut secret = String::new();
     secret.push_str(&header_str);
     secret.push('.');
     secret.push_str(&claims_str);
 
-    let pkey = openssl::pkey::PKey::from_rsa(priv_key.to_owned())?;
-    let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &pkey)?;
-    signer.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
-    signer.update(&secret.as_bytes())?;
-    let signature = base64::encode_config(&signer.sign_to_vec()?, base64::URL_SAFE_NO_PAD);
+    let pkey = openssl::pkey::PKey::from_rsa(priv_key.to_owned())
+        .map_err(|e| StringError(e.to_string()))?;
+    let mut signer = openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), &pkey)
+        .map_err(|e| StringError(e.to_string()))?;
+    signer.set_rsa_padding(openssl::rsa::Padding::PKCS1).map_err(|e| StringError(e.to_string()))?;
+    signer.update(&secret.as_bytes()).map_err(|e| StringError(e.to_string()))?;
+    let signature = URL_SAFE_NO_PAD.encode(
+        &signer.sign_to_vec().map_err(|e| StringError(e.to_string()))?
+    );
 
     secret.push('.');
     secret.push_str(&signature);
@@ -269,22 +297,20 @@ fn encode_jwt_rsa<H: serde::Serialize, C: serde::Serialize>(header: &H, claims: 
     Ok(secret)
 }
 
-async fn get_apple_keys() -> failure::Fallible<JWKSet> {
-    let client = reqwest::r#async::Client::new();
+async fn get_apple_keys() -> Result<JWKSet, actix_web::error::Error> {
+    let client = reqwest::Client::new();
     Ok(client
         .get("https://appleid.apple.com/auth/keys")
         .send()
-        .compat()
-        .await?
+        .await.map_err(|e| StringError(e.to_string()))?
         .json::<JWKSet>()
-        .compat()
-        .await?)
+        .await.map_err(|e| StringError(e.to_string()))?)
 }
 
-async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<OauthTokenInfo>) -> failure::Fallible<impl actix_web::Responder> {
+async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<OauthTokenInfo>) -> Result<impl actix_web::Responder, actix_web::error::Error> {
     let cert = match data.certs.get(&info.client_id) {
         Some(c) => c,
-        None => bail!("Client ID not found")
+        None => return Err(StringError("Client ID not found".to_string()).into())
     };
 
     if info.client_secret != cert.client_secret {
@@ -299,8 +325,10 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
     let exp = now + std::time::Duration::new(5 * 60, 0);
     let claims = AppleSecretClaims {
         iss: "MQ9TN9772U".to_string(),
-        iat: now.duration_since(std::time::SystemTime::UNIX_EPOCH)?.as_secs(),
-        exp: exp.duration_since(std::time::SystemTime::UNIX_EPOCH)?.as_secs(),
+        iat: now.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_err(|e| StringError(e.to_string()))?.as_secs(),
+        exp: exp.duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map_err(|e| StringError(e.to_string()))?.as_secs(),
         aud: "https://appleid.apple.com".to_string(),
         sub: info.client_id.clone(),
     };
@@ -310,22 +338,33 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
     let code: Option<OauthCode> = match &info.code {
         Some(code) => {
             let parts: Vec<&str> = code.split(".").collect();
-            ensure!(parts.len() == 3);
+            if parts.len() != 3 {
+                return Err(StringError("Invalid number of parts to JWT".to_string()).into())
+            }
             let header: AppleSecretHeader = serde_json::from_slice(
-                &base64::decode_config(parts[0], base64::URL_SAFE_NO_PAD)?
-            )?;
-            ensure!(&header.kid == &info.client_id);
-            let pkey = openssl::pkey::PKey::from_rsa(cert.id_key.clone())?;
+                &URL_SAFE_NO_PAD.decode(parts[0]).map_err(|e| StringError(e.to_string()))?
+            ).map_err(|e| StringError(e.to_string()))?;
+            if &header.kid != &info.client_id {
+                return Err(StringError("Token not for requesting client".to_string()).into())
+            }
+            let pkey = openssl::pkey::PKey::from_rsa(cert.id_key.clone())
+                .map_err(|e| StringError(e.to_string()))?;
 
-            let sig = base64::decode_config(parts[2], base64::URL_SAFE_NO_PAD)?;
-            let mut verifier = openssl::sign::Verifier::new(openssl::hash::MessageDigest::sha256(), &pkey)?;
-            verifier.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
-            verifier.update(parts[0].as_bytes())?;
-            verifier.update(".".as_bytes())?;
-            verifier.update(parts[1].as_bytes())?;
-            ensure!(verifier.verify(&sig)?);
+            let sig = URL_SAFE_NO_PAD.decode(parts[2])
+                .map_err(|e| StringError(e.to_string()))?;
+            let mut verifier = openssl::sign::Verifier::new(openssl::hash::MessageDigest::sha256(), &pkey)
+                .map_err(|e| StringError(e.to_string()))?;
+            verifier.set_rsa_padding(openssl::rsa::Padding::PKCS1).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(parts[0].as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(".".as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(parts[1].as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            if !verifier.verify(&sig).map_err(|e| StringError(e.to_string()))? {
+                return Err(StringError("Signature verification failed".to_string()).into());
+            }
 
-            Some(serde_json::from_slice(&base64::decode_config(parts[1], base64::URL_SAFE_NO_PAD)?)?)
+            Some(serde_json::from_slice(
+                &URL_SAFE_NO_PAD.decode(parts[1]).map_err(|e| StringError(e.to_string()))?
+            ).map_err(|e| StringError(e.to_string()))?)
         }
         None => None
     };
@@ -335,8 +374,8 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
     };
 
     let own_uri = format!("https://{}/auth/callback", req.connection_info().host());
-    let client = reqwest::r#async::Client::new();
-    let mut resp = client.post("https://appleid.apple.com/auth/token")
+    let client = reqwest::Client::new();
+    let resp = client.post("https://appleid.apple.com/auth/token")
         .form(&OauthTokenInfo {
             client_id: info.client_id.clone(),
             client_secret: secret,
@@ -345,41 +384,49 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
             refresh_token: info.refresh_token.clone(),
             redirect_uri: Some(own_uri),
         })
-        .send().compat().await?;
+        .send().await.map_err(|e| StringError(e.to_string()))?;
 
-    let token = resp.json::<TokenResponse>().compat().await?;
+    let token = resp.json::<TokenResponse>().await.map_err(|e| StringError(e.to_string()))?;
 
     let parts: Vec<&str> = token.id_token.split(".").collect();
-    ensure!(parts.len() == 3);
+    if parts.len() != 3 {
+        return Err(StringError("Invalid number of parts to JWT".to_string()).into())
+    }
     let header: AppleSecretHeader = serde_json::from_slice(
-        &base64::decode_config(parts[0], base64::URL_SAFE_NO_PAD)?
+        &URL_SAFE_NO_PAD.decode(parts[0]).map_err(|e| StringError(e.to_string()))?
     )?;
     let keys = get_apple_keys().await?;
     let key = match keys.get_key(&header.kid) {
         Some(k) => k,
-        None => bail!("Apple signing key not found")
+        None => return Err(StringError("Apple signing key not found".to_string()).into())
     };
 
     match key.kty.as_str() {
         "RSA" => {
-            let e = base64::decode_config(&key.e, base64::URL_SAFE_NO_PAD)?;
-            let n = base64::decode_config(&key.n, base64::URL_SAFE_NO_PAD)?;
+            let e = URL_SAFE_NO_PAD.decode(&key.e).map_err(|e| StringError(e.to_string()))?;
+            let n = URL_SAFE_NO_PAD.decode(&key.n).map_err(|e| StringError(e.to_string()))?;
 
-            let e = openssl::bn::BigNum::from_slice(&e)?;
-            let n = openssl::bn::BigNum::from_slice(&n)?;
+            let e = openssl::bn::BigNum::from_slice(&e).map_err(|e| StringError(e.to_string()))?;
+            let n = openssl::bn::BigNum::from_slice(&n).map_err(|e| StringError(e.to_string()))?;
 
-            let key = openssl::rsa::Rsa::from_public_components(n, e)?;
-            let pkey = openssl::pkey::PKey::from_rsa(key)?;
+            let key = openssl::rsa::Rsa::from_public_components(n, e)
+                .map_err(|e| StringError(e.to_string()))?;
+            let pkey = openssl::pkey::PKey::from_rsa(key)
+                .map_err(|e| StringError(e.to_string()))?;
 
-            let sig = base64::decode_config(parts[2], base64::URL_SAFE_NO_PAD)?;
-            let mut verifier = openssl::sign::Verifier::new(openssl::hash::MessageDigest::sha256(), &pkey)?;
-            verifier.set_rsa_padding(openssl::rsa::Padding::PKCS1)?;
-            verifier.update(parts[0].as_bytes())?;
-            verifier.update(".".as_bytes())?;
-            verifier.update(parts[1].as_bytes())?;
-            ensure!(verifier.verify(&sig)?);
+            let sig = URL_SAFE_NO_PAD.decode(parts[2])
+                .map_err(|e| StringError(e.to_string()))?;
+            let mut verifier = openssl::sign::Verifier::new(openssl::hash::MessageDigest::sha256(), &pkey)
+                .map_err(|e| StringError(e.to_string()))?;
+            verifier.set_rsa_padding(openssl::rsa::Padding::PKCS1).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(parts[0].as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(".".as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            verifier.update(parts[1].as_bytes()).map_err(|e| StringError(e.to_string()))?;
+            if !verifier.verify(&sig).map_err(|e| StringError(e.to_string()))? {
+                return Err(StringError("Signature verification failed".to_string()).into());
+            }
         }
-        _ => bail!("Apple ID token should be using RSA")
+        _ => return Err(StringError("Apple ID token should be using RSA".to_string()).into())
     };
 
     let new_header = AppleSecretHeader {
@@ -387,7 +434,7 @@ async fn get_token(req: HttpRequest, data: web::Data<Config>, info: web::Form<Oa
         kid: info.client_id.clone(),
     };
     let mut claims: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(
-        &base64::decode_config(parts[1], base64::URL_SAFE_NO_PAD)?
+        &URL_SAFE_NO_PAD.decode(parts[1]).map_err(|e| StringError(e.to_string()))?
     )?;
 
     if let Some(code) = code {
@@ -445,7 +492,7 @@ impl JWKSet {
     }
 }
 
-async fn jwks(data: web::Data<Config>) -> actix_web::Result<impl actix_web::Responder> {
+async fn jwks(data: web::Data<Config>) -> impl actix_web::Responder {
     let keys: Vec<_> = data.certs.iter()
         .map(|(client_id, cert)| {
             let n = cert.id_key.n().to_vec();
@@ -456,124 +503,34 @@ async fn jwks(data: web::Data<Config>) -> actix_web::Result<impl actix_web::Resp
                 r#use: "sig".to_string(),
                 alg: "RS256".to_string(),
                 kid: client_id.to_string(),
-                n: base64::encode_config(&n, base64::URL_SAFE_NO_PAD),
-                e: base64::encode_config(&e, base64::URL_SAFE_NO_PAD),
+                n: URL_SAFE_NO_PAD.encode(&n),
+                e: URL_SAFE_NO_PAD.encode(&e),
             }
         })
         .collect();
 
-    Ok(
-        HttpResponse::Ok()
-            .json(&JWKSet {
-                keys
-            })
-    )
-}
-
-#[derive(Deserialize)]
-struct ABCOauthLoginInfo {
-    client_id: String,
-    redirect_uri: String,
-    scope: Option<String>,
-    state: Option<String>,
-    response_type: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ABCOauthTokenInfo {
-    client_id: String,
-    client_secret: String,
-    code: String,
-    grant_type: String,
-    redirect_uri: String,
-}
-
-async fn start_abc_login(info: web::Query<ABCOauthLoginInfo>) -> actix_web::Result<impl actix_web::Responder> {
-    let mut redirect_uri =
-        format!(
-            "https://account.cardifftec.uk/auth/realms/{}/protocol/openid-connect/auth?client_id=apple-business-chat&redirect_uri={}&response_type={}",
-            info.client_id, info.redirect_uri, info.response_type
-        );
-
-    if info.redirect_uri != "https://auth.businesschat.apple.com" {
-        return Ok(
-            HttpResponse::BadRequest().finish()
-        );
-    }
-
-    if let Some(scope) = &info.scope {
-        redirect_uri.push_str(&format!("&scope={}", scope));
-    }
-    if let Some(state) = &info.state {
-        redirect_uri.push_str(&format!("&state={}", state));
-    }
-
-    Ok(
-        HttpResponse::Found()
-            .header(actix_web::http::header::LOCATION, redirect_uri)
-            .finish()
-    )
-}
-
-async fn abc_token(info: web::Query<ABCOauthTokenInfo>) -> failure::Fallible<impl actix_web::Responder> {
-    if info.redirect_uri != "https://auth.businesschat.apple.com" {
-        return Ok(
-            HttpResponse::BadRequest().finish()
-        );
-    }
-
-    let token_uri = format!(
-        "https://account.cardifftec.uk/auth/realms/{}/protocol/openid-connect/token",
-        info.client_id
-    );
-
-    let client = reqwest::r#async::Client::new();
-    let mut resp = client.post(reqwest::Url::parse(&token_uri)?)
-        .form(&ABCOauthTokenInfo {
-            client_id: "apple-business-chat".to_string(),
-            client_secret: info.client_secret.clone(),
-            code: info.code.clone(),
-            grant_type: info.grant_type.clone(),
-            redirect_uri: info.redirect_uri.clone()
+    HttpResponse::Ok()
+        .json(&JWKSet {
+            keys
         })
-        .send().compat().await?;
-
-    if !resp.status().is_success() {
-        return Ok(
-            HttpResponse::new(resp.status())
-        )
-    }
-
-    let token = resp.json::<TokenResponse>().compat().await?;
-
-    Ok(
-        HttpResponse::Ok()
-            .json(token)
-    )
 }
 
-fn main() {
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
     pretty_env_logger::init();
     openssl_probe::init_ssl_cert_env_vars();
-
-    let _guard = sentry::init("https://e0c980d93d9044ba877d3ee123debaee@sentry.io/1817437");
-    sentry::integrations::panic::register_panic_handler();
-
-    let sys = actix::System::new("apple-oidc-adaptor");
 
     let data = config();
 
     let mut server = HttpServer::new(move || {
         App::new()
-            .data(data.clone())
+            .app_data(data.clone())
             .wrap(middleware::Logger::default())
             .wrap(middleware::Compress::default())
-            .route("/auth/authorize", web::get().to_async(actix_web_async_await::compat2(start_login)))
-            .route("/auth/callback", web::post().to_async(actix_web_async_await::compat2(finish_login)))
-            .route("/auth/token", web::post().to_async(actix_web_async_await::compat3(get_token)))
-            .route("/auth/keys", web::get().to_async(actix_web_async_await::compat(jwks)))
-            .route("/abc/authorize", web::get().to_async(actix_web_async_await::compat(start_abc_login)))
-            .route("/abc/token", web::post().to_async(actix_web_async_await::compat(abc_token)))
+            .route("/auth/authorize", web::get().to(start_login))
+            .route("/auth/callback", web::post().to(finish_login))
+            .route("/auth/token", web::post().to(get_token))
+            .route("/auth/keys", web::get().to(jwks))
     });
 
     let mut listenfd = listenfd::ListenFd::from_env();
@@ -585,6 +542,5 @@ fn main() {
         server.bind("0.0.0.0:3000").unwrap()
     };
 
-    server.start();
-    let _ = sys.run();
+    server.run().await
 }
