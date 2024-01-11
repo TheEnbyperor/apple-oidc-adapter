@@ -39,6 +39,7 @@ RUN cargo install --target x86_64-unknown-linux-musl --path .
 
 FROM scratch
 
+COPY --from=builder --chown=0:0 /etc/ssl/certs /etc/ssl/certs
 COPY --from=builder --chown=0:0 /usr/local/cargo/bin/apple-oidc-adapter /
 
 ENTRYPOINT ["/apple-oidc-adapter"]
