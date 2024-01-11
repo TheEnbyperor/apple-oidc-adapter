@@ -39,6 +39,6 @@ RUN cargo install --target x86_64-unknown-linux-musl --path .
 
 FROM scratch
 
-COPY --from=builder --chown=0:0 /usr/local/cargo/bin/apple-oidc-adaptor /
+COPY --from=builder --chown=0:0 /usr/local/cargo/bin/apple-oidc-adapter /
 
-ENTRYPOINT ["/apple-oidc-adaptor"]
+ENTRYPOINT ["/apple-oidc-adapter"]
